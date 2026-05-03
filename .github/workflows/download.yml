@@ -29,13 +29,21 @@ jobs:
           pip install --upgrade yt-dlp
           yt-dlp --version
 
-      - name: Write cookies file (Clean version without comments)
+      - name: Write cookies file (Proper Netscape format)
         env:
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
         run: |
           if [ -n "$YOUTUBE_COOKIES" ]; then
-            # Remove comments and empty lines, save clean cookies
-            echo "$YOUTUBE_COOKIES" | grep -v '^#' | grep -v '^$' > /tmp/yt-cookies.txt
+            # Create proper Netscape format cookies file
+            # First line MUST be the Netspace header
+            echo "# Netscape HTTP Cookie File" > /tmp/yt-cookies.txt
+            echo "# https://curl.haxx.se/rfc/cookie_spec.html" >> /tmp/yt-cookies.txt
+            echo "# This is a generated file! Do not edit." >> /tmp/yt-cookies.txt
+            echo "" >> /tmp/yt-cookies.txt
+          
+            # Append the actual cookies (preserve all lines, even comments)
+            echo "$YOUTUBE_COOKIES" >> /tmp/yt-cookies.txt
+          
             echo "COOKIES_FILE=/tmp/yt-cookies.txt" >> $GITHUB_ENV
           
             COOKIE_LINES=$(wc -l < /tmp/yt-cookies.txt)
@@ -52,19 +60,22 @@ jobs:
               echo "✓ VISITOR_INFO1_LIVE cookie found"
             fi
           
-            # Show first 3 non-comment lines for debugging (without exposing sensitive values)
-            echo "Cookie domains found:"
-            grep -o '^[^\t]*' /tmp/yt-cookies.txt | head -5 | sed 's/.*/  - &/'
+            # Show first line to verify format
+            echo "Cookie file header: $(head -1 /tmp/yt-cookies.txt)"
           else
             echo "⚠ No cookies provided - downloads may be rate-limited or fail"
           fi
 
-      - name: Test yt-dlp with cookies and Deno
+      - name: Test yt-dlp with cookies
         run: |
-          echo "Testing yt-dlp configuration with a public video..."
+          echo "Testing yt-dlp configuration..."
           
           if [ -f "$COOKIES_FILE" ]; then
             echo "Using cookies from: $COOKIES_FILE"
+            echo "First 3 lines of cookie file:"
+            head -3 "$COOKIES_FILE"
+          
+            # Test with a simple video
             yt-dlp --cookies "$COOKIES_FILE" \
               --js-runtimes deno \
               --remote-components ejs:npm \
@@ -73,13 +84,16 @@ jobs:
               "https://www.youtube.com/watch?v=jNQXAC9IVRw" 2>&1 | tee test.log
           
             if grep -q "Sign in to confirm" test.log; then
-              echo "❌ Cookie authentication failed - cookies may be expired"
+              echo "❌ Cookie authentication failed"
+              exit 1
+            elif grep -q "does not look like a Netscape format" test.log; then
+              echo "❌ Cookie format error"
               exit 1
             elif grep -q "n challenge" test.log; then
               echo "❌ JavaScript challenge failed"
               exit 1
             else
-              echo "✅ Test successful - cookies working"
+              echo "✅ Test successful"
             fi
           else
             echo "⚠ No cookies file to test"

@@ -14,10 +14,12 @@ MAX_PART_BYTES = 1_900 * 1024 * 1024  # 1.9 GB
 
 
 def run(cmd, **kwargs):
+    """Run a shell command and return the result"""
     return subprocess.run(cmd, shell=True, text=True, capture_output=True, **kwargs)
 
 
 def is_playlist(url):
+    """Check if URL is a YouTube playlist"""
     return "playlist?list=" in url or "/playlist/" in url
 
 
@@ -27,19 +29,30 @@ def yt_dlp_cmd(url, output_template, playlist):
     # Use Deno with remote EJS components
     js_flags = "--js-runtimes deno --remote-components ejs:npm"
 
-    # Format: prioritize 720p
+    # Format: prioritize 720p, then any video with audio
     fmt = "bestvideo[height<=720]+bestaudio/bestvideo+bestaudio/best"
 
     no_playlist = "" if playlist else "--no-playlist"
 
-    # Cookies - ensure they're properly formatted
-    cookies = f'--cookies "{COOKIES_FILE}"' if COOKIES_FILE and Path(COOKIES_FILE).exists() else ""
+    # Cookies - check if file exists and is readable
+    cookies = ""
+    if COOKIES_FILE and Path(COOKIES_FILE).exists():
+        # Verify it's a valid cookies file (has Netscape header)
+        with open(COOKIES_FILE, 'r') as f:
+            first_line = f.readline().strip()
+            if '# Netscape HTTP Cookie File' in first_line:
+                cookies = f'--cookies "{COOKIES_FILE}"'
+                print(f"  Using cookies from: {COOKIES_FILE}")
+            else:
+                print(f"  ⚠ Cookie file missing required header")
+    else:
+        print(f"  ⚠ No valid cookies file found")
 
-    # Critical: Use web client with cookies
+    # Use web client which properly supports cookies
     extractor_args = '--extractor-args "youtube:player_client=web"'
 
     # Mimic a real browser
-    user_agent = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"'
+    user_agent = '--user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"'
 
     return (
         f'yt-dlp -f "{fmt}" --merge-output-format mp4 '
@@ -52,6 +65,7 @@ def yt_dlp_cmd(url, output_template, playlist):
 
 
 def read_info_json(tmpdir):
+    """Read the .info.json file created by yt-dlp"""
     info_jsons = sorted(Path(tmpdir).rglob("*.info.json"))
     if not info_jsons:
         return {}
@@ -62,6 +76,7 @@ def read_info_json(tmpdir):
 
 
 def zip_files(files, zip_path):
+    """Create a zip file containing the given files"""
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in files:
             zf.write(f, f.name)
@@ -69,6 +84,7 @@ def zip_files(files, zip_path):
 
 
 def split_and_zip(mp4, tmpdir):
+    """Split large MP4 files into parts and zip each part"""
     prefix = str(mp4) + ".part"
     run(f'split -b {MAX_PART_BYTES} "{mp4}" "{prefix}"')
     parts = sorted(Path(tmpdir).glob(mp4.name + ".part*"))
@@ -81,10 +97,12 @@ def split_and_zip(mp4, tmpdir):
 
 
 def release_exists(tag):
+    """Check if a GitHub release already exists"""
     return run(f'gh release view "{tag}" --repo "{REPO}"').returncode == 0
 
 
 def create_or_upload_release(tag, title, notes, files):
+    """Create a new release or upload files to existing one"""
     files_str = " ".join(f'"{f}"' for f in files)
     notes_escaped = notes.replace('"', '\\"').replace('\n', '\\n')
 
@@ -100,11 +118,13 @@ def create_or_upload_release(tag, title, notes, files):
 
 
 def get_release_url(tag):
+    """Get the URL for a GitHub release"""
     result = run(f'gh release view "{tag}" --repo "{REPO}" --json url -q .url')
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def process_entry(entry, tmpdir):
+    """Process a single video/playlist entry"""
     url = entry["url"]
     playlist = is_playlist(url)
 
@@ -128,7 +148,7 @@ def process_entry(entry, tmpdir):
     # Find downloaded MP4 files
     mp4_files = sorted(Path(tmpdir).rglob("*.mp4"))
     if not mp4_files:
-        # Check for other formats
+        # Check for other video formats
         other_formats = list(Path(tmpdir).rglob("*.mkv")) + list(Path(tmpdir).rglob("*.webm"))
         if other_formats:
             print(f"  Converting {len(other_formats)} files to MP4...")
@@ -138,8 +158,10 @@ def process_entry(entry, tmpdir):
                 mp4_files.append(new_name)
         else:
             print("  ❌ ERROR: No video files produced")
+            all_files = list(Path(tmpdir).rglob("*"))
+            print(f"  Files created: {[f.name for f in all_files[:5]]}")
             entry["status"] = "failed"
-            entry["error"] = "No video files produced"
+            entry["error"] = "No video files produced by yt-dlp"
             return entry
 
     # Read metadata
@@ -150,6 +172,7 @@ def process_entry(entry, tmpdir):
     print(f"  📝 Title: {safe_title}")
     print(f"  📁 Files: {len(mp4_files)} video file(s)")
 
+    # Handle playlist vs single video
     if playlist:
         pl_id = info.get("playlist_id") or info.get("playlist") or Path(tmpdir).name
         tag = f"yt-playlist-{pl_id}"[:100]
@@ -166,8 +189,9 @@ def process_entry(entry, tmpdir):
                 zip_path = Path(tmpdir) / f"{mp4.stem}.zip"
                 upload_files.append(zip_files([mp4], zip_path))
 
-        notes = f"Source: {url}\nVideos: {len(mp4_files)}"
+        notes = f"Source: {url}\nTotal videos: {len(mp4_files)}"
     else:
+        # Single video
         video_id = info.get("id") or mp4_files[0].stem
         tag = f"yt-{safe_title}"[:100]
         mp4 = mp4_files[0]
@@ -175,6 +199,7 @@ def process_entry(entry, tmpdir):
         print(f"  📦 Size: {size_mb:.2f} MB")
 
         if mp4.stat().st_size > MAX_PART_BYTES:
+            print(f"  ✂ Splitting large file...")
             upload_files = split_and_zip(mp4, tmpdir)
             notes = f"Source: {url}\nSplit into {len(upload_files)} parts"
         else:
@@ -182,10 +207,13 @@ def process_entry(entry, tmpdir):
             upload_files = [zip_files([mp4], zip_path)]
             notes = f"Source: {url}"
 
+    # Create release and upload files
     result = create_or_upload_release(tag, safe_title, notes, upload_files)
     if result.returncode != 0:
+        error_msg = result.stderr[-500:].strip()
+        print(f"  ❌ ERROR uploading: {error_msg}")
         entry["status"] = "failed"
-        entry["error"] = result.stderr[-500:].strip()
+        entry["error"] = error_msg
         return entry
 
     entry["status"] = "done"
@@ -198,6 +226,7 @@ def process_entry(entry, tmpdir):
 
 
 def main():
+    """Main entry point"""
     print("=" * 60)
     print("🎬 YouTube Download Script")
     print("=" * 60)
@@ -206,7 +235,12 @@ def main():
         print(f"❌ Error: {VIDEOS_JSON} not found")
         exit(1)
 
-    videos = json.loads(VIDEOS_JSON.read_text())
+    try:
+        videos = json.loads(VIDEOS_JSON.read_text())
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parsing videos.json: {e}")
+        exit(1)
+
     pending = [v for v in videos if v.get("status") == "pending"]
 
     if not pending:
@@ -230,6 +264,8 @@ def main():
     failed = [v for v in videos if v.get("status") == "failed"]
 
     print("\n" + "=" * 60)
+    print("📊 SUMMARY")
+    print("=" * 60)
     print(f"✅ Successful: {len(successful)}")
     print(f"❌ Failed: {len(failed)}")
 
@@ -238,6 +274,8 @@ def main():
 
     if failed:
         exit(1)
+
+    print("\n🎉 All done!")
 
 
 if __name__ == "__main__":
